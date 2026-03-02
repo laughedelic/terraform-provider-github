@@ -361,6 +361,103 @@ data "github_ip_ranges" "test" {}
 		})
 	})
 
+	t.Run("env_var_prefix reads prefixed env vars", func(t *testing.T) {
+		config := `
+		provider "github" {
+			env_var_prefix = "CUSTOM"
+			auth_mode      = "token"
+		}
+		data "github_ip_ranges" "test" {}
+		`
+
+		resource.Test(t, resource.TestCase{
+			PreCheck: func() {
+				skipUnlessMode(t, individual)
+				t.Setenv("GITHUB_TOKEN", "")
+				t.Setenv("CUSTOM_TOKEN", testAccConf.token)
+				t.Setenv("CUSTOM_OWNER", testAccConf.owner)
+			},
+			ProviderFactories: providerFactories,
+			Steps: []resource.TestStep{
+				{
+					Config:             config,
+					PlanOnly:           true,
+					ExpectNonEmptyPlan: false,
+				},
+			},
+		})
+	})
+
+	t.Run("env_var_prefix ignores GITHUB_TOKEN when custom prefix set", func(t *testing.T) {
+		config := `
+		provider "github" {
+			env_var_prefix = "CUSTOM"
+			auth_mode      = "token"
+		}
+		data "github_ip_ranges" "test" {}
+		`
+
+		resource.Test(t, resource.TestCase{
+			PreCheck: func() {
+				t.Setenv("GITHUB_TOKEN", "should-be-ignored")
+				t.Setenv("CUSTOM_TOKEN", "")
+				t.Setenv("GH_PATH", "none-existent-path")
+			},
+			ProviderFactories: providerFactories,
+			Steps: []resource.TestStep{
+				{
+					Config:      config,
+					ExpectError: regexp.MustCompile(`auth_mode is set to "token" but no token was provided`),
+				},
+			},
+		})
+	})
+
+	t.Run("env_var_prefix defaults to GITHUB for backward compat", func(t *testing.T) {
+		config := `
+		provider "github" {
+		}
+		data "github_ip_ranges" "test" {}
+		`
+
+		resource.Test(t, resource.TestCase{
+			PreCheck:          func() { t.Setenv("GITHUB_TOKEN", ""); t.Setenv("GH_PATH", "none-existent-path") },
+			ProviderFactories: providerFactories,
+			Steps: []resource.TestStep{
+				{
+					Config:             config,
+					PlanOnly:           true,
+					ExpectNonEmptyPlan: false,
+				},
+			},
+		})
+	})
+
+	t.Run("env_var_prefix with explicit HCL token takes priority", func(t *testing.T) {
+		config := fmt.Sprintf(`
+		provider "github" {
+			env_var_prefix = "CUSTOM"
+			auth_mode      = "token"
+			token          = "%s"
+			owner          = "%s"
+		}`, testAccConf.token, testAccConf.owner)
+
+		resource.Test(t, resource.TestCase{
+			PreCheck: func() {
+				skipUnlessMode(t, individual)
+				t.Setenv("CUSTOM_TOKEN", "")
+			},
+			ProviderFactories: providerFactories,
+			Steps: []resource.TestStep{
+				{
+					Config:             config,
+					PlanOnly:           true,
+					ExpectNonEmptyPlan: false,
+				},
+			},
+		})
+	})
+
 	t.Run("should not allow both token and app_auth to be configured", func(t *testing.T) {
 		t.Skip("This would be a semver breaking change, this will be reinstated for v7.")
 		config := fmt.Sprintf(`

@@ -81,7 +81,7 @@ provider "github" {
 }
 ```
 
-When `auth_mode` is set to `"token"`, the provider requires the `token` argument or `GITHUB_TOKEN` environment variable. An error will be returned if no token is provided.
+When `auth_mode` is set to `"token"`, the provider requires the `token` argument or the `TOKEN` environment variable (e.g. `GITHUB_TOKEN` with the default prefix). An error will be returned if no token is provided.
 
 #### GitHub App Installation
 
@@ -111,6 +111,41 @@ When `auth_mode` is not set, the provider auto-detects the authentication method
 This is equivalent to the pre-existing behavior and is preserved for backward compatibility.
 
 ~> **Note:** Using `auth_mode = "anonymous"` is the only way to ensure the provider runs anonymously when `GITHUB_TOKEN` or GitHub CLI credentials are present in the environment.
+
+### Custom Environment Variable Prefix
+
+By default, the provider reads environment variables with the `GITHUB_` prefix (e.g. `GITHUB_TOKEN`, `GITHUB_OWNER`). You can override this with the `env_var_prefix` argument to use a custom prefix. This is especially useful when configuring multiple provider instances with different credentials via environment variables:
+
+```terraform
+provider "github" {
+  alias          = "org1"
+  env_var_prefix = "GH_ORG1"
+  auth_mode      = "token"
+  # Reads GH_ORG1_TOKEN, GH_ORG1_OWNER, etc.
+}
+
+provider "github" {
+  alias          = "org2"
+  env_var_prefix = "GH_ORG2"
+  auth_mode      = "token"
+  # Reads GH_ORG2_TOKEN, GH_ORG2_OWNER, etc.
+}
+```
+
+```console
+export GH_ORG1_TOKEN="ghp_xxx"
+export GH_ORG1_OWNER="my-org-1"
+export GH_ORG2_TOKEN="ghp_yyy"
+export GH_ORG2_OWNER="my-org-2"
+```
+
+When a custom prefix is set, the provider **only** reads environment variables with that prefix — the default `GITHUB_*` variables are completely ignored. This prevents accidental credential leakage between provider instances.
+
+For each field, the resolution priority is:
+
+1. Explicit HCL value
+2. Prefixed environment variable (e.g. `{PREFIX}_TOKEN`)
+3. Default value (e.g. for `base_url`)
 
 ### GitHub CLI (Deprecated)
 
