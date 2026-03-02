@@ -7,6 +7,7 @@ import (
 	"net/url"
 	"os"
 	"os/exec"
+	"strconv"
 	"strings"
 	"time"
 
@@ -18,23 +19,26 @@ import (
 func Provider() *schema.Provider {
 	p := &schema.Provider{
 		Schema: map[string]*schema.Schema{
+			"env_var_prefix": {
+				Type:        schema.TypeString,
+				Optional:    true,
+				Default:     "GITHUB",
+				Description: descriptions["env_var_prefix"],
+			},
 			"auth_mode": {
 				Type:         schema.TypeString,
 				Optional:     true,
-				DefaultFunc:  schema.EnvDefaultFunc("GITHUB_AUTH_MODE", nil),
 				Description:  descriptions["auth_mode"],
 				ValidateFunc: validation.StringInSlice([]string{"anonymous", "token", "app"}, false),
 			},
 			"token": {
 				Type:        schema.TypeString,
 				Optional:    true,
-				DefaultFunc: schema.EnvDefaultFunc("GITHUB_TOKEN", nil),
 				Description: descriptions["token"],
 			},
 			"owner": {
 				Type:        schema.TypeString,
 				Optional:    true,
-				DefaultFunc: schema.EnvDefaultFunc("GITHUB_OWNER", nil),
 				Description: descriptions["owner"],
 			},
 			"retryable_errors": {
@@ -60,14 +64,13 @@ func Provider() *schema.Provider {
 			"organization": {
 				Type:        schema.TypeString,
 				Optional:    true,
-				DefaultFunc: schema.EnvDefaultFunc("GITHUB_ORGANIZATION", nil),
 				Description: descriptions["organization"],
 				Deprecated:  "Use owner (or GITHUB_OWNER) instead of organization (or GITHUB_ORGANIZATION)",
 			},
 			"base_url": {
 				Type:        schema.TypeString,
 				Optional:    true,
-				DefaultFunc: schema.EnvDefaultFunc("GITHUB_BASE_URL", "https://api.github.com/"),
+				Default:     "https://api.github.com/",
 				Description: descriptions["base_url"],
 			},
 			"insecure": {
@@ -133,27 +136,24 @@ func Provider() *schema.Provider {
 			"app_id": {
 				Type:        schema.TypeString,
 				Optional:    true,
-				DefaultFunc: schema.EnvDefaultFunc("GITHUB_APP_ID", nil),
 				Description: descriptions["app_id"],
 			},
 			"app_installation_id": {
 				Type:        schema.TypeString,
 				Optional:    true,
-				DefaultFunc: schema.EnvDefaultFunc("GITHUB_APP_INSTALLATION_ID", nil),
 				Description: descriptions["app_installation_id"],
 			},
 			"app_private_key": {
 				Type:        schema.TypeString,
 				Optional:    true,
 				Sensitive:   true,
-				DefaultFunc: schema.EnvDefaultFunc("GITHUB_APP_PRIVATE_KEY", nil),
 				Description: descriptions["app_private_key"],
 			},
 			// https://developer.github.com/guides/traversing-with-pagination/#basics-of-pagination
 			"max_per_page": {
 				Type:        schema.TypeInt,
 				Optional:    true,
-				DefaultFunc: schema.EnvDefaultFunc("GITHUB_MAX_PER_PAGE", "100"),
+				Default:     100,
 				Description: descriptions["max_per_page"],
 			},
 		},
@@ -333,6 +333,10 @@ var descriptions map[string]string
 
 func init() {
 	descriptions = map[string]string{
+		"env_var_prefix": "Prefix for environment variable names read by the provider. " +
+			"Defaults to `GITHUB`. Set this to a custom value to allow multiple provider instances " +
+			"configured via different sets of environment variables (e.g. `GITHUB_ORG1_TOKEN`, `GITHUB_ORG2_TOKEN`).",
+
 		"auth_mode": "Explicit authentication mode. Valid values are `anonymous`, `token`, and `app`. " +
 			"When not set, the provider auto-detects the mode based on provided credentials for backward compatibility.",
 
@@ -377,13 +381,24 @@ func init() {
 	}
 }
 
+// resolveField reads a string provider field, falling back to
+// the prefixed environment variable if the field is empty.
+// The env var name is derived as PREFIX + "_" + UPPER(field).
+func resolveField(d *schema.ResourceData, field string, prefix string) string {
+	if v := d.Get(field).(string); v != "" {
+		return v
+	}
+	return os.Getenv(prefix + "_" + strings.ToUpper(field))
+}
+
 func providerConfigure(p *schema.Provider) schema.ConfigureContextFunc {
 	return func(ctx context.Context, d *schema.ResourceData) (any, diag.Diagnostics) {
 		var diags diag.Diagnostics
 
-		owner := d.Get("owner").(string)
+		prefix := d.Get("env_var_prefix").(string) // defaults to "GITHUB"
+		authMode := resolveField(d, "auth_mode", prefix)
+		owner := resolveField(d, "owner", prefix)
 		insecure := d.Get("insecure").(bool)
-		authMode := d.Get("auth_mode").(string)
 
 		// BEGIN backwards compatibility
 		// OwnerOrOrgEnvDefaultFunc used to be the default value for both
@@ -395,18 +410,21 @@ func providerConfigure(p *schema.Provider) schema.ConfigureContextFunc {
 		// an explicitly set value in a provider block), but is necessary
 		// for backwards compatibility. We could remove this backwards compatibility
 		// code in a future major release.
-		env := ownerOrOrgEnvDefaultFunc()
-		if env.(string) != "" {
-			owner = env.(string)
+		if env := ownerOrOrgEnvDefaultFunc(prefix); env != "" {
+			owner = env
 		}
 		// END backwards compatibility
 
-		baseURL, isGHES, err := getBaseURL(d.Get("base_url").(string))
+		baseURLStr := resolveField(d, "base_url", prefix)
+		if baseURLStr == "" {
+			baseURLStr = "https://api.github.com/"
+		}
+		baseURL, isGHES, err := getBaseURL(baseURLStr)
 		if err != nil {
 			return nil, diag.FromErr(err)
 		}
 
-		org := d.Get("organization").(string)
+		org := resolveField(d, "organization", prefix)
 		if org != "" {
 			log.Printf("[INFO] Selecting organization attribute as owner: %s", org)
 			owner = org
@@ -419,25 +437,25 @@ func providerConfigure(p *schema.Provider) schema.ConfigureContextFunc {
 			log.Printf("[INFO] Auth mode: anonymous")
 
 		case "token":
-			token = d.Get("token").(string)
+			token = resolveField(d, "token", prefix)
 			if token == "" {
 				return nil, diag.FromErr(fmt.Errorf(
-					"auth_mode is set to \"token\" but no token was provided; " +
-						"set the `token` argument or `GITHUB_TOKEN` environment variable"))
+					"auth_mode is set to \"token\" but no token was provided; "+
+						"set the `token` argument or `%s_TOKEN` environment variable", prefix))
 			}
 			log.Printf("[INFO] Auth mode: token")
 
 		case "app":
-			appID, appInstallationID, appPemFile := getAppCredentials(d)
+			appID, appInstallationID, appPemFile := getAppCredentials(d, prefix)
 			var missingFields []string
 			if appID == "" {
-				missingFields = append(missingFields, "app_id (GITHUB_APP_ID)")
+				missingFields = append(missingFields, "app_id ("+prefix+"_APP_ID)")
 			}
 			if appInstallationID == "" {
-				missingFields = append(missingFields, "app_installation_id (GITHUB_APP_INSTALLATION_ID)")
+				missingFields = append(missingFields, "app_installation_id ("+prefix+"_APP_INSTALLATION_ID)")
 			}
 			if appPemFile == "" {
-				missingFields = append(missingFields, "app_private_key (GITHUB_APP_PRIVATE_KEY)")
+				missingFields = append(missingFields, "app_private_key ("+prefix+"_APP_PRIVATE_KEY)")
 			}
 			if len(missingFields) > 0 {
 				return nil, diag.FromErr(fmt.Errorf(
@@ -459,10 +477,10 @@ func providerConfigure(p *schema.Provider) schema.ConfigureContextFunc {
 			log.Printf("[INFO] Auth mode: app (ID: %s, installation: %s)", appID, appInstallationID)
 
 		default: // auto-detect (backward compatibility)
-			token = d.Get("token").(string)
+			token = resolveField(d, "token", prefix)
 
 			if token == "" {
-				appID, appInstallationID, appPemFile := getAppCredentials(d)
+				appID, appInstallationID, appPemFile := getAppCredentials(d, prefix)
 				if appID != "" && appInstallationID != "" && appPemFile != "" {
 					apiPath := ""
 					if isGHES {
@@ -487,8 +505,8 @@ func providerConfigure(p *schema.Provider) schema.ConfigureContextFunc {
 						Severity: diag.Warning,
 						Summary:  "GitHub CLI token fallback is deprecated",
 						Detail: "Automatic token detection from `gh auth token` is deprecated and will be removed in a future major release. " +
-							"Please set the `token` provider argument or `GITHUB_TOKEN` environment variable explicitly. " +
-							"You can use `export GITHUB_TOKEN=$(gh auth token)` as a replacement.",
+							"Please set the `token` provider argument or `" + prefix + "_TOKEN` environment variable explicitly. " +
+							"You can use `export " + prefix + "_TOKEN=$(gh auth token)` as a replacement.",
 					})
 				}
 			}
@@ -532,6 +550,13 @@ func providerConfigure(p *schema.Provider) schema.ConfigureContextFunc {
 		}
 
 		_maxPerPage := d.Get("max_per_page").(int)
+		if envMaxPerPage := os.Getenv(prefix + "_MAX_PER_PAGE"); envMaxPerPage != "" {
+			v, err := strconv.Atoi(envMaxPerPage)
+			if err != nil {
+				return nil, diag.FromErr(fmt.Errorf("invalid %s_MAX_PER_PAGE value %q: %w", prefix, envMaxPerPage, err))
+			}
+			_maxPerPage = v
+		}
 		if _maxPerPage <= 0 {
 			return nil, diag.FromErr(fmt.Errorf("max_per_page must be greater than than 0"))
 		}
@@ -565,22 +590,16 @@ func providerConfigure(p *schema.Provider) schema.ConfigureContextFunc {
 	}
 }
 
-func getAppCredentials(d *schema.ResourceData) (appID, appInstallationID, appPemFile string) {
-	// Try top-level fields first
-	if v, ok := d.Get("app_id").(string); ok && v != "" {
-		appID = v
-	}
-	if v, ok := d.Get("app_installation_id").(string); ok && v != "" {
-		appInstallationID = v
-	}
-	if v, ok := d.Get("app_private_key").(string); ok && v != "" {
+func getAppCredentials(d *schema.ResourceData, prefix string) (appID, appInstallationID, appPemFile string) {
+	// Try top-level fields first (HCL value, then prefixed env var)
+	appID = resolveField(d, "app_id", prefix)
+	appInstallationID = resolveField(d, "app_installation_id", prefix)
+	if v := resolveField(d, "app_private_key", prefix); v != "" {
 		// The Go encoding/pem package only decodes PEM formatted blocks
 		// that contain new lines. Some platforms, like Terraform Cloud,
 		// do not support new lines within Environment Variables.
 		// Any occurrence of \n in the `app_private_key` argument's value
-		// (explicit value, or default value taken from
-		// GITHUB_APP_PRIVATE_KEY Environment Variable) is replaced with an
-		// actual new line character before decoding.
+		// is replaced with an actual new line character before decoding.
 		appPemFile = strings.ReplaceAll(v, `\n`, "\n")
 	}
 
@@ -643,12 +662,14 @@ func tokenFromGHCLI(u *url.URL) string {
 	return strings.TrimSpace(string(out))
 }
 
-func ownerOrOrgEnvDefaultFunc() any {
-	if organization := os.Getenv("GITHUB_ORGANIZATION"); organization != "" {
-		log.Printf("[INFO] Selecting owner %s from GITHUB_ORGANIZATION environment variable", organization)
+func ownerOrOrgEnvDefaultFunc(prefix string) string {
+	if organization := os.Getenv(prefix + "_ORGANIZATION"); organization != "" {
+		log.Printf("[INFO] Selecting owner %s from %s_ORGANIZATION environment variable", organization, prefix)
 		return organization
 	}
-	owner := os.Getenv("GITHUB_OWNER")
-	log.Printf("[INFO] Selecting owner %s from GITHUB_OWNER environment variable", owner)
+	owner := os.Getenv(prefix + "_OWNER")
+	if owner != "" {
+		log.Printf("[INFO] Selecting owner %s from %s_OWNER environment variable", owner, prefix)
+	}
 	return owner
 }
